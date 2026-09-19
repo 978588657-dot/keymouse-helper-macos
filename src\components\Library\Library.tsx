@@ -1,0 +1,282 @@
+import * as React from "react";
+import {
+  Trash2,
+  FileText,
+  RotateCcw,
+  X,
+  Download,
+  FolderOpen,
+  Library as LibraryIcon,
+} from "lucide-react";
+import { save } from "@tauri-apps/plugin-dialog";
+import { useApp } from "@/store";
+import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
+import { EmptyState } from "@/components/ui/empty-state";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Tooltip } from "@/components/ui/tooltip";
+import { ipc } from "@/lib/ipc";
+import type { MacroMeta, TrashEntry } from "@/lib/types";
+
+/** Top-bar button that opens the macro library in a dialog (not a nav tab). */
+export function LibraryButton() {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Tooltip label="Library">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Open library"
+          onClick={() => setOpen(true)}
+        >
+          <LibraryIcon className="h-5 w-5" />
+        </Button>
+      </Tooltip>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Library</DialogTitle>
+          <DialogDescription>
+            Open a saved macro, or manage Trash. Opening one loads it into the editor.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[70vh] overflow-auto">
+          <LibraryPanel onOpened={() => setOpen(false)} />
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Saved macros as cards, plus the Trash. Used inside the Library dialog. */
+export function LibraryPanel({ onOpened }: { onOpened?: () => void }) {
+  const { library, loadFromLibrary, deleteFromLibrary, toast } = useApp();
+  const [trashOpen, setTrashOpen] = React.useState(false);
+
+  const revealFolder = () =>
+    ipc.revealMacroFolder().catch((e) => toast(`Couldn't open folder: ${e}`, "error"));
+
+  const exportMacro = async (m: MacroMeta) => {
+    try {
+      const dest = await save({
+        defaultPath: `${m.name}.json`,
+        filters: [{ name: "Macro", extensions: ["json"] }],
+      });
+      if (!dest) return;
+      const macro = await ipc.loadMacro(m.path);
+      await ipc.saveMacro(dest, macro, true);
+      toast(`Exported ${m.name}`, "success");
+    } catch (e) {
+      toast(`Export failed: ${e}`, "error");
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-title font-semibold">Saved macros</h2>
+        <div className="flex items-center gap-1.5">
+          <Button size="sm" variant="ghost" onClick={revealFolder}>
+            <FolderOpen className="h-4 w-4" /> Open folder
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setTrashOpen(true)}>
+            <Trash2 className="h-4 w-4" /> Trash
+          </Button>
+        </div>
+      </div>
+
+      {library.length === 0 ? (
+        <EmptyState
+          title="No saved macros yet"
+          description="Build or record one, then Save."
+        />
+      ) : (
+        <ul className="grid grid-cols-1 items-start gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {library.map((m) => (
+            <MacroCard
+              key={m.path}
+              m={m}
+              onOpen={async () => {
+                await loadFromLibrary(m);
+                onOpened?.();
+              }}
+              onExport={() => exportMacro(m)}
+              onDelete={() => deleteFromLibrary(m)}
+            />
+          ))}
+        </ul>
+      )}
+
+      <TrashDialog open={trashOpen} onOpenChange={setTrashOpen} />
+    </div>
+  );
+}
+
+function MacroCard({
+  m,
+  onOpen,
+  onExport,
+  onDelete,
+}: {
+  m: MacroMeta;
+  onOpen: () => void;
+  onExport: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <li
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      className="group relative cursor-pointer self-start rounded-card border border-border bg-surface p-4 transition-colors hover:border-accent/50"
+    >
+      <div className="flex items-start justify-between">
+        <FileText className="h-4 w-4 text-muted/60" />
+        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          <IconButton label={`Export ${m.name}`} onClick={onExport}>
+            <Download className="h-4 w-4" />
+          </IconButton>
+          <IconButton label={`Delete ${m.name}`} variant="danger" onClick={onDelete}>
+            <Trash2 className="h-4 w-4" />
+          </IconButton>
+        </div>
+      </div>
+      <div className="mt-2 truncate text-ui font-medium">{m.name}</div>
+      <div className="tabular mt-0.5 text-body text-muted">
+        {m.source} · {m.event_count} events
+      </div>
+    </li>
+  );
+}
+
+function TrashDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const { refreshLibrary, toast, confirm } = useApp();
+  const [entries, setEntries] = React.useState<TrashEntry[]>([]);
+  const [loading, setLoading] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      setEntries(await ipc.listTrash());
+    } catch (e) {
+      toast(`Couldn't load Trash: ${e}`, "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  React.useEffect(() => {
+    if (open) void load();
+  }, [open, load]);
+
+  const restore = async (t: TrashEntry) => {
+    try {
+      const path = await ipc.restoreMacro(t.token);
+      const landed = path.replace(/^.*[\\/]/, "").replace(/\.json$/, "");
+      toast(
+        landed && landed !== t.original_name
+          ? `Restored as ${landed}`
+          : `Restored ${t.original_name}`,
+        "success",
+      );
+      await Promise.all([load(), refreshLibrary()]);
+    } catch (e) {
+      toast(`Restore failed: ${e}`, "error");
+    }
+  };
+
+  const purge = async (t: TrashEntry) => {
+    const ok = await confirm({
+      title: `Permanently delete ${t.original_name}?`,
+      description: "This can't be undone.",
+      confirmLabel: "Delete forever",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await ipc.purgeTrash(t.token);
+      await load();
+    } catch (e) {
+      toast(`Couldn't delete: ${e}`, "error");
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Trash</DialogTitle>
+          <DialogDescription>
+            Recently deleted macros. Restore one, or delete it forever.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-80 overflow-auto">
+          {loading ? (
+            <p className="px-1 py-6 text-center text-xs text-muted">Loading…</p>
+          ) : entries.length === 0 ? (
+            <p className="px-1 py-6 text-center text-xs text-muted">Trash is empty.</p>
+          ) : (
+            <ul className="space-y-1">
+              {entries.map((t) => (
+                <li
+                  key={t.token}
+                  className="flex items-center gap-2 rounded-control px-2 py-2 hover:bg-surface"
+                >
+                  <Trash2 className="h-4 w-4 shrink-0 text-muted" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm">{t.original_name}</div>
+                    <div className="tabular text-[11px] text-muted">
+                      {t.event_count} events · {relTime(t.trashed_at)}
+                    </div>
+                  </div>
+                  <Button size="sm" variant="secondary" onClick={() => restore(t)}>
+                    <RotateCcw className="h-3.5 w-3.5" /> Restore
+                  </Button>
+                  <IconButton
+                    label={`Delete ${t.original_name} forever`}
+                    variant="danger"
+                    onClick={() => purge(t)}
+                  >
+                    <X className="h-4 w-4" />
+                  </IconButton>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function relTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  const diff = Date.now() - t;
+  const mins = Math.round(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hr ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}

@@ -1,0 +1,33 @@
+name: Build macOS app
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Build universal macOS application
+        run: bun run tauri build --target universal-apple-darwin
+      - name: Collect app and DMG
+        run: |
+          mkdir -p mac-output
+          find src-tauri/target/universal-apple-darwin/release/bundle \
+            \( -name '*.app' -o -name '*.dmg' \) -maxdepth 3 \
+            -exec cp -R {} mac-output/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keymouse-helper-macos-universal
+          path: mac-output/
+          if-no-files-found: error
